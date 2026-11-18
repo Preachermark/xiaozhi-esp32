@@ -1,5 +1,17 @@
 # Define source files
-set(SOURCES "audio/audio_codec.cc"
+set(SOURCES "sd_card_manager.cc"
+            "radio_ui.cc"
+            "sd_radio.cc"
+            "ts_demux.cc"
+            "photo_ui.cc"
+            "sd_books.cc"
+            "reader_ui.cc"
+            "sd_music.cc"
+            "music_list_ui.cc"
+            "sd_emoji.cc"
+            "sd_recorder.cc"
+            "sd_log.cc"
+            "audio/audio_codec.cc"
             "audio/audio_debugger.cc"
             "audio/audio_service.cc"
             "audio/demuxer/ogg_demuxer.cc"
@@ -1197,6 +1209,8 @@ endif()
 # on that target and keep other target builds unchanged.
 if(IDF_TARGET STREQUAL "esp32s3")
     list(APPEND MAIN_PRIV_REQUIRES_EXTRA esp_driver_usb_serial_jtag)
+    # [TF卡] 1 线 SDMMC 所需组件；原来只在 P4 板级条件里加过
+    list(APPEND MAIN_PRIV_REQUIRES_EXTRA esp_driver_sdmmc sdmmc)
 endif()
 idf_component_register(SRCS ${SOURCES}
                     EMBED_FILES ${LANG_SOUNDS} ${COMMON_SOUNDS}
@@ -1227,6 +1241,14 @@ idf_component_register(SRCS ${SOURCES}
                         fatfs
                         xiaozhi-fonts
                         ${MAIN_PRIV_REQUIRES_EXTRA}
+                        esp_audio_codec
+                        esp_audio_effects
+                        esp_http_client
+                        mbedtls
+                        esp_http_client
+                        mbedtls
+                        esp_http_client
+                        mbedtls
                     )
 
 # Keep project-owned C++ on GNU C++23. ESP-IDF 6 may default to a newer

@@ -39,7 +39,7 @@
 
 #define OPUS_FRAME_DURATION_MS 60
 #define MAX_ENCODE_TASKS_IN_QUEUE 2
-#define MAX_PLAYBACK_TASKS_IN_QUEUE 2
+#define MAX_PLAYBACK_TASKS_IN_QUEUE 8
 #define MAX_DECODE_PACKETS_IN_QUEUE (1200 / OPUS_FRAME_DURATION_MS)
 #define MAX_SEND_PACKETS_IN_QUEUE (2400 / OPUS_FRAME_DURATION_MS)
 #define AUDIO_TESTING_MAX_DURATION_MS 10000
@@ -142,7 +142,14 @@ public:
 
     void SetCallbacks(AudioServiceCallbacks& callbacks);
 
+    // [录音] 抓一份喂给音频引擎之前的 PCM（16kHz/16bit/单声道）。回调在音频输入任务里跑，必须极快。
+    using InputTap = std::function<void(const std::vector<int16_t>&)>;
+    void SetInputTap(InputTap tap) { input_tap_ = std::move(tap); }
+
     bool PushPacketToDecodeQueue(std::unique_ptr<AudioStreamPacket> packet, bool wait = false);
+    // [音乐] 把已解码的 PCM（24kHz 单声道）直接塞进播放队列，走 codec 输出。
+    // 不碰 I2S，音量、省电定时器、AEC 参考全部照旧。
+    bool PushPcmToPlaybackQueue(std::vector<int16_t>&& pcm, bool wait = true);
     std::unique_ptr<AudioStreamPacket> PopPacketFromSendQueue();
     void PlaySound(const std::string_view& sound);
     bool ReadAudioData(std::vector<int16_t>& data, int sample_rate, int samples);
@@ -152,6 +159,7 @@ public:
 private:
     AudioCodec* codec_ = nullptr;
     AudioServiceCallbacks callbacks_;
+    InputTap input_tap_;   // [录音]
     std::unique_ptr<AudioEngine> audio_engine_;
     std::unique_ptr<AudioDebugger> audio_debugger_;
     void* opus_encoder_ = nullptr;
