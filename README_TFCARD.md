@@ -205,6 +205,35 @@ TF 卡目录结构：
 
 ---
 
+## 预编译固件（不想自己编就用这个）
+
+仓库里放了一份编好的应用固件，刷进去即可，不必搭 ESP-IDF 环境。
+
+| 项目 | 值 |
+|---|---|
+| 文件 | `firmware/xiaozhi-lichuang-s3-20261118.bin` |
+| 大小 | 3682192 字节 |
+| SHA256 | `357b70eeaf61923b1035645772624fac03bcb470a8433c5c03b6484e2d1cffee` |
+| 对应源码提交 | `c3a18a7d` |
+| 适用板型 | 立创实战派 ESP32-S3（**仅此板验证过**） |
+
+**只写 app 分区，别动其它分区：**
+
+```bash
+esptool.py --chip esp32s3 -p /dev/ttyACM0 --baud 460800 \
+  write_flash 0x20000 xiaozhi-lichuang-s3-20261118.bin
+```
+
+⚠️ **不要** `write_flash 0x0`、不要 `erase_flash`、也不要直接用 `idf.py flash` 做全量烧录。
+分区表（`0x8000`）和资源分区 `assets`（`0x800000`，8 MB，装表情、中文字库、唤醒词模型）
+一旦被覆盖，轻则表情和字库全丢，重则开机起不来 —— assets 得回上游工程用
+`scripts/spiffs_assets/build.py` 重新生成，很麻烦。
+
+**这个固件里不含任何账号信息**：只有应用代码。WiFi 凭据、API key、bot token 都在
+NVS 分区里，不在这个文件中，所以可以放心分发给别人。
+
+---
+
 ## 编译方法
 
 ```bash
