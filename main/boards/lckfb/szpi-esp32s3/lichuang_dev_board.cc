@@ -85,6 +85,12 @@ private:
     PressToTalkMcpTool* press_to_talk_tool_ = nullptr;
     PowerSaveTimer* power_save_timer_ = nullptr;   // [screen-off patch]
     bool screen_sleeping_ = false;                 // [screen-off patch]
+    // [screen-off v11] 手动熄屏锁：为 true 时锁住触控，只有长按 B 键能点亮。
+    // 自动息屏(60s)不会设这个标志，所以暗屏状态下碰屏幕仍然能唤醒。
+    bool manual_screen_off_ = false;
+    // [v11c] 熄屏时刻（lv_tick 毫秒）。背光是渐变的，熄屏后几百毫秒内
+    // brightness() 还在从旧值往 0 掉，不能在这段窗口里判断「有人点亮了」。
+    uint32_t manual_off_tick_ = 0;
     // [screen-off patch v7] 分区点击与下拉菜单
     lv_obj_t* menu_panel_ = nullptr;
     bool menu_visible_ = false;
@@ -204,8 +210,11 @@ private:
         // [screen-off patch] 长按 B 键切换息屏 / 亮屏
         boot_button_.OnLongPress([this]() {
             screen_sleeping_ = !screen_sleeping_;
+            // [v11] 只有 B 键能改这个锁：熄屏时锁住触控，亮屏时解锁
+            manual_screen_off_ = screen_sleeping_;
             GetDisplay()->SetPowerSaveMode(screen_sleeping_);
             if (screen_sleeping_) {
+                manual_off_tick_ = lv_tick_get();   // [v11c] 渐变开始，记时刻
                 GetBacklight()->SetBrightness(0);
             } else {
                 GetBacklight()->RestoreBrightness();
@@ -223,12 +232,26 @@ private:
     void InitializePowerSaveTimer() {
         power_save_timer_ = new PowerSaveTimer(-1, 60, 300);
         power_save_timer_->OnEnterSleepMode([this]() {
+            // [screen-off patch v10] B 键手动熄屏时亮度被设成 0，而这一级原来是
+            // 无条件 SetBrightness(10)，于是过 60 秒屏幕从全黑变成暗亮，看起来像
+            // "自己亮起来了"。已手动熄屏就保持全黑，直接早退。
+            if (screen_sleeping_) {
+                GetBacklight()->SetBrightness(0);
+                ESP_LOGI(TAG, "Auto sleep: keep fully off (manual)");
+                return;
+            }
             screen_sleeping_ = true;
             GetDisplay()->SetPowerSaveMode(true);
             GetBacklight()->SetBrightness(10);
             ESP_LOGI(TAG, "Auto sleep: dimming screen");
         });
         power_save_timer_->OnExitSleepMode([this]() {
+            // [v11] 手动熄屏锁生效期间，任何非用户触发的退出睡眠都不许点屏。
+            // （触摸已被锁住，所以走到这里的只可能是 ApplySettings / SetEnabled 那类内部调用）
+            if (manual_screen_off_) {
+                ESP_LOGI(TAG, "Auto sleep: keep off (manual lock)");
+                return;
+            }
             screen_sleeping_ = false;
             GetDisplay()->SetPowerSaveMode(false);
             GetBacklight()->RestoreBrightness();
@@ -793,6 +816,8 @@ private:
             }
             case kMenuScreenOff:
                 screen_sleeping_ = true;
+                manual_screen_off_ = true;   // [v11] 菜单息屏同样锁触控
+                manual_off_tick_ = lv_tick_get();
                 GetDisplay()->SetPowerSaveMode(true);
                 GetBacklight()->SetBrightness(0);
                 HideMenu();
@@ -923,6 +948,40 @@ private:
         chat_clear_timer_ = lv_timer_create([](lv_timer_t* t) {
             auto* self = static_cast<LichuangDevBoard*>(lv_timer_get_user_data(t));
             if (self == nullptr) return;
+            // [screen-off v11b] 手动熄屏锁生效期间，若背光被外部力量点亮（最典型是
+            // 用户让她调 self.screen.set_brightness），立刻解锁触控，否则会卡在
+            // 「屏幕亮着但点不动」的怪状态。
+            // [v12] 语音唤醒亮屏：被叫醒（connecting/listening/speaking/notifying）
+            // 就点亮并解锁。触摸误触是另一条路，仍被锁挡着，不会亮。
+            if (self->manual_screen_off_ &&
+                (lv_tick_get() - self->manual_off_tick_) > 3000) {
+                auto st = Application::GetInstance().GetDeviceState();
+                if (st == kDeviceStateConnecting || st == kDeviceStateListening ||
+                    st == kDeviceStateSpeaking || st == kDeviceStateNotifying) {
+                    self->manual_screen_off_ = false;
+                    self->screen_sleeping_ = false;
+                    if (auto* d = Board::GetInstance().GetDisplay()) {
+                        d->SetPowerSaveMode(false);
+                    }
+                    if (auto* bl2 = Board::GetInstance().GetBacklight()) {
+                        bl2->RestoreBrightness();
+                    }
+                    ESP_LOGI(TAG, "Voice wake: screen on (state=%d)", (int)st);
+                }
+            }
+            // [v11c] 熄屏后 3 秒内不检查：那段时间亮的是渐变尾巴，不是有人点亮
+            if (self->manual_screen_off_ &&
+                (lv_tick_get() - self->manual_off_tick_) > 3000) {
+                auto* bl = Board::GetInstance().GetBacklight();
+                if (bl != nullptr && bl->brightness() > 0) {
+                    self->manual_screen_off_ = false;
+                    self->screen_sleeping_ = false;
+                    if (auto* d = Board::GetInstance().GetDisplay()) {
+                        d->SetPowerSaveMode(false);
+                    }
+                    ESP_LOGI(TAG, "Manual lock released: backlight=%d", bl->brightness());
+                }
+            }
             bool any_open = self->music_ui_visible_ ||
                             RadioUi::GetInstance().IsVisible() ||
                             ReaderUi::GetInstance().IsVisible() ||
@@ -1015,6 +1074,10 @@ private:
                         if (self == nullptr) {
                             return;
                         }
+                        // [v11] 手动熄屏期间：触摸既不唤醒屏幕，也不处理点击
+                        if (self->manual_screen_off_) {
+                            return;
+                        }
                         if (self->power_save_timer_ != nullptr) {
                             self->power_save_timer_->WakeUp();
                         }
@@ -1030,6 +1093,8 @@ private:
                     lv_obj_add_event_cb(overlay, [](lv_event_t* e) {
                         auto* self = static_cast<LichuangDevBoard*>(lv_event_get_user_data(e));
                         if (self == nullptr) return;
+                        // [v11] 手动熄屏期间不记录按下点，避免残留状态干扰点亮后的第一次点击
+                        if (self->manual_screen_off_) return;
                         lv_indev_get_point(lv_indev_active(), &self->tap_press_pt_);
                         self->tap_swiped_ = false;
                         if (self->power_save_timer_ != nullptr) {
